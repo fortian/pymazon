@@ -19,12 +19,15 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import os
 import sys
+
+#for dev only
+sys.path.append('/home/brucewayne/development/pymazon/hg')
 from optparse import OptionParser
-from pymazon.settings import PymazonSettings
+from pymazon.settings import settings
 from pymazon.log_util import PymazonLogger
 
 
-settings = PymazonSettings()
+
 logger = PymazonLogger('main')
 
 

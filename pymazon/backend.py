@@ -18,14 +18,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import os
 import sys
+sys.path.append('/home/brucewayne/development/pymazon/hg')
 import base64
-import re
 import urllib2
 import threading
-import cStringIO
+from cStringIO import StringIO
 import string
-from xml.etree import cElementTree
-from collections import deque
+from xml.parsers import expat
+from collections import deque, defaultdict
 
 try:
     from Crypto.Cipher import DES
@@ -35,11 +35,12 @@ except ImportError:
     print msg
     sys.exit()
 
-from pymazon.settings import PymazonSettings
+from pymazon.settings import settings
 from pymazon.log_util import PymazonLogger
 
-settings = PymazonSettings()
+
 logger = PymazonLogger('backend')
+
 
 
 class ImageCache:
@@ -71,119 +72,72 @@ class ImageCache:
             # Try to nab the url. If we don't succeed, oh well:
             try:
                 pixbuf = self._download(url)
-            except:
+            except urllib2.URLError:
                 pixbuf = ''
             # Write whatever we got to the cache, and return it:
             self.cache[url] = pixbuf
             return pixbuf
-
-
-class ParseException(Exception):
-    pass
-
-
-class AmzParser(object):
-    '''Parse the individual track information from 
-    an Amazon .amz file.
-    
-    This class creates a callable object that returns a list 
-    of Track objects. 
-    
-    Usage:
-    
-    parse = AmzParser()
-    tracks = parse('./amz_file.amz')
-    
-    '''
-    
-    xmlns = 'http://xspf.org/ns/0/'
-
-    def __call__(self, filename):
-        f = open(filename, 'rb')
-        data = f.read()
-        f.close()
-        decryptor = AmzDecryptor()
-        amz_xml = decryptor.decrypt(data)
-        return self.parse(amz_xml)
         
-    def _find_elem(self, track, which, find_all=False):
-        search_string = '{%s}%s' % (self.xmlns, which)
-        search_func = track.findall if find_all else track.find
-        return search_func(search_string)
-
-    def parse(self, amz_xml):        
-        try:
-            tree = cElementTree.fromstring(amz_xml)
-        except SyntaxError:
-            raise ParseException('Failure parsing XML to etree, ill-formed XML.')
-
-        parsed_tracks = []
-
-        tracklist = tree.find('{%s}trackList' % self.xmlns)
-        tracks = tracklist.findall('{%s}track' % self.xmlns)
-        if not tracks:
-            raise ParseException('Failure Parsing Tracks')
         
-        tags = ['location', 'creator', 'title', 'trackNum', 'album', 'image']
-        track_keys = ['url', 'artist', 'title', 'tracknum', 'album', 'image']
-        for track in tracks:            
-            track_elems = [self._find_elem(track, t) for t in tags]            
-            try:
-                track_data = [elem.text for elem in track_elems]
-            except AttributeError, e:               
-                raise ParseException('Failure parsing data from etree element. '
-                                     'Perhaps the XML format has changed.')            
-            pd = dict(zip(track_keys, track_data))
-            
-            # The filesize is special cause it's burried in metadata:
-            # Amazon doesn't report proper filesizes, so this is worthless
-            # for verifying the download, but handy for a progress indicator
-            metas = self._find_elem(track, 'meta', find_all=True)
-            if not metas:
-                raise ParseException('Failure parsing meta data from etree. '
-                                     'Perhaps the XML format has changed.')
-            try:                
-                for meta in metas:
-                    if meta.attrib['rel'].endswith('fileSize'):
-                        filesize = meta.text
-                        break                    
-                pd['filesize'] = filesize
-            except AttributeError:
-                raise ParseException('Failure parsing filesize '
-                                     'from etree element.') 
-            except NameError:
-                raise ParseException('Failure finding filesize in metadata')
-            
-            parsed_tracks.append(Track(pd))
-        return parsed_tracks
-
-parse_tracks = AmzParser()
-
-
-class Track(object):    
-    def __init__(self, track_info):
-        for key, value in track_info.iteritems():
-            setattr(self, key, value)
-        self.status = ''
-
-    def __str__(self):
-        return str(self.__dict__)
-
-    def get_save_name(self):
-        '''Returns the save name of the track according to 
-        the template specified by the user. It is possible
-        that this will include partial path componenents,
-        and thus should be os.path.join()'ed with the
-        designated save directory.
+image_cache = ImageCache()        
         
-        '''
+
+class Album(object):
+    def __init__(self, title=None, artist=None, image_url=None, tracks=None):
+        self.title = title
+        self.artist = artist        
+        self.tracks = tracks or [] 
+        self.image_url = image_url
+        
+    @property
+    def image(self):
+        return image_cache.get(self.image_url)
+    
+
+class Track(object):
+    def __init__(self, album, title=None, number=None, url=None, filesize=None):
+        self.album = album
+        self.title = title
+        self.number = number
+        self.url = url
+        self.filesize = filesize
+        self.data = None
+        
+    def save(self):
+        if not self.data:
+            raise IOError('No data to save.')
+        
+        if not os.access(settings.save_dir, os.W_OK):
+            raise IOError('No write access to save dir.')
+        
+        # use the user-specified template to generate
+        # the stem
         template = string.Template(settings.name_template)
-        sn = template.safe_substitute(artist=self.artist, title=self.title,
-                                      tracknum=self.tracknum,
-                                      album=self.album)
-        return sn
+        sn = template.safe_substitute(artist=self.album.artist, 
+                                      title=self.title,
+                                      tracknum=self.number,
+                                      album=self.album.name)
+        
+        # combine the stem, with the base path and file extension
+        # to get the fully qualified save path.
+        fname = os.path.join(settings.save_dir, sn + '.mp3')
+            
+        # ensure we don't overwrite any files
+        i = 1
+        nfname = fname
+        while True:
+            if not os.path.isfile(nfname):
+                break
+            nfname = os.path.splitext(fname)[0]
+            nfname = ''.join([nfname, '(', str(i), ')', '.mp3'])
+            i += 1
+        fname = nfname
+        
+        f = open(fname, 'wb')
+        f.write(self.data)
+        f.close()
 
-
+        
 class DecryptException(Exception):
     pass
 
@@ -201,25 +155,152 @@ class AmzDecryptor(object):
     
     # the key and initial value for the .amz DES CBC encryption
     KEY = '\x29\xAB\x9D\x18\xB2\x44\x9E\x31'
-    IV = '\x5E\x72\xD7\x9A\x11\xB3\x4F\xEE'
-    
-    def __init__(self,):        
-        self.d_obj = DES.new(self.KEY, DES.MODE_CBC, self.IV)
+    IV = '\x5E\x72\xD7\x9A\x11\xB3\x4F\xEE'    
         
-    def _strip_trailing_bytes(self, amz_xml):
-        # strips the 8byte-even-block padding to make
-        # a valid xml file
-        match = re.match(r'.*</playlist>', amz_xml, re.DOTALL)
-        if not match:
-            raise DecryptException('Failure stripping ending XML padding.')
-        return match.group()
+    def strip_trailing_bytes(self, amz_xml):
+        # strips the octet even block padding to make
+        # a valid xml file. Amazon doesn't follow the padding 
+        # convention specified by the DES standard, 
+        # rather, they add 8 -'\x08' bytes, and enough 
+        # '\x00' bytes to make the file mod(8) even. 
+        # The problem is that we don't know how many '\x00' bytes 
+        # there are. So, we strip bytes until we reach the first
+        # xml closing tag.
+        buf = StringIO(amz_xml)
+        n = -1
+        buf.seek(n, 2)
+        while buf.read(1) != '>':
+            n -= 1
+            buf.seek(n, 2)    
+        buf.truncate()    
+        return buf.getvalue()
 
     def decrypt(self, amz_data):
+        d_obj = DES.new(self.KEY, DES.MODE_CBC, self.IV)
         cipher = base64.b64decode(amz_data)
-        xml = self.d_obj.decrypt(cipher)
-        valid_xml = self._strip_trailing_bytes(xml)
+        xml = d_obj.decrypt(cipher)
+        valid_xml = self.strip_trailing_bytes(xml)
         return valid_xml
+    
+    
+class ParseException(Exception):
+    pass
 
+
+class AmzParser(object):
+    
+    def __init__(self):
+        self.parser = None        
+        self.parsed_objects = []
+        self.current_track = None
+        self.in_tracklist = False
+        self.now_url = False
+        self.now_artist = False
+        self.now_album = False
+        self.now_title = False
+        self.now_image = False
+        self.now_tracknum = False
+        self.now_filesize = False   
+    
+    def start_element(self, name, attrs):
+        if name == 'trackList':
+            self.in_tracklist = True        
+        if self.in_tracklist:
+            if name == 'track':            
+                self.current_track = defaultdict(str)
+            elif name == 'location':
+                self.now_url = True
+            elif name == 'creator':
+                self.now_artist = True
+            elif name == 'album':
+                self.now_album = True
+            elif name == 'title':
+                self.now_title = True
+            elif name == 'image':
+                self.now_image = True
+            elif name == 'trackNum':
+                self.now_tracknum = True
+            elif name == 'meta':
+                if attrs['rel'].endswith('fileSize'):
+                    self.now_filesize = True
+    
+    def end_element(self, name):
+        if name == 'trackList':
+            self.in_tracklist = False
+        if self.in_tracklist:
+            if name == 'track':
+                self.add_track()
+            elif name == 'location':
+                self.now_url = False
+            elif name == 'creator':
+                self.now_artist = False
+            elif name == 'album':
+                self.now_album = False
+            elif name == 'title':
+                self.now_title = False
+            elif name == 'image':
+                self.now_image = False
+            elif name == 'trackNum':
+                self.now_tracknum = False
+            elif name == 'meta':
+                self.now_filesize = False
+    
+    def character_data(self, data):        
+        if self.now_url:
+            self.current_track['url'] += data
+        elif self.now_artist:
+            self.current_track['artist'] += data
+        elif self.now_album:
+            self.current_track['album'] += data
+        elif self.now_title:
+            self.current_track['title'] += data
+        elif self.now_image:
+            self.current_track['image'] += data
+        elif self.now_tracknum:
+            self.current_track['tracknum'] += data
+        elif self.now_filesize:
+            self.current_track['filesize'] += data
+        
+    def add_track(self):
+        album = self.current_track['album']
+        artist = self.current_track['artist']
+        # if the current track does not share the same artist 
+        # and album name as any existing album, create a new album.
+        for obj in self.parsed_objects:
+            if isinstance(obj, Album):                
+                if (obj.title == album) and (obj.artist == artist):
+                    self.add_track_to_album(obj)
+                    return        
+        new_album = Album(title=album,
+                          artist=artist,
+                          image_url=self.current_track['image'])
+        self.add_track_to_album(new_album)
+        self.parsed_objects.append(new_album)
+                    
+    def add_track_to_album(self, album):
+        new_track = Track(title=self.current_track['title'],
+                          url=self.current_track['url'],
+                          album=album,
+                          number=self.current_track['tracknum'],
+                          filesize=self.current_track['filesize'])
+        album.tracks.append(new_track)        
+     
+    def create_new_parser(self):
+        self.parser = expat.ParserCreate()
+        self.parser.StartElementHandler = self.start_element
+        self.parser.EndElementHandler = self.end_element
+        self.parser.CharacterDataHandler = self.character_data
+        
+    def parse(self, amz):
+        amz_data = open(amz).read()
+        decryptor = AmzDecryptor()
+        xml = decryptor.decrypt(amz_data)
+        self.create_new_parser()
+        self.parser.Parse(xml)        
+        
+    def get_parsed_objects(self):
+        return self.parsed_objects
+    
 
 class _DownloadWorker(threading.Thread):
     '''A very simple thread worker for the download thread pool.
@@ -274,7 +355,7 @@ class _DownloadWorker(threading.Thread):
         fs = int(track.filesize)
         perc_complete = 0
         chunk_size = fs / 100 # totally arbitray chunksize, 1% of file per chunk
-        buf = cStringIO.StringIO()
+        buf = StringIO()
         self.callback(track, 1, perc_complete)
         try:
             while True:

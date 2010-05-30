@@ -22,11 +22,8 @@ from PyQt4.QtCore import Qt, QAbstractTableModel, pyqtSignal, QSize, QVariant
 
 from pymazon import _qtgui
 from pymazon import _qtfmtdialog
-from pymazon.backend import parse_tracks, Downloader, ImageCache
-from pymazon.settings import PymazonSettings
-
-
-settings = PymazonSettings()
+from pymazon.backend import AmzParser, Downloader, ImageCache
+from pymazon.settings import settings
 
 
 class AlbumArt(QLabel):

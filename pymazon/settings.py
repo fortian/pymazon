@@ -58,7 +58,7 @@ class PymazonSettingsError(Exception):
     pass
 
 
-class PymazonSettings(object):   
+class _PymazonSettings(object):   
             
     # some sensible defaults
     pymazon_dir = _get_pymazon_dir()
@@ -71,9 +71,9 @@ class PymazonSettings(object):
                'num_threads']   
             
     def __setattr__(self, attr, value):
-        if attr not in PymazonSettings.__all__:
+        if attr not in _PymazonSettings.__all__:
             msg = 'The specified setting is not a valid setting. '
-            msg += 'Valid settings are: %s' % PymazonSettings.__all__
+            msg += 'Valid settings are: %s' % _PymazonSettings.__all__
             raise PymazonSettingsError(msg)
                 
         if attr == 'name_template':
@@ -97,7 +97,7 @@ class PymazonSettings(object):
         else:
             pass               
                 
-        setattr(PymazonSettings, attr, value)
+        setattr(_PymazonSettings, attr, value)
             
     def __validate_name_template(self, templ):
         # make sure at least the title will be present, else default to safe.
@@ -113,7 +113,7 @@ class PymazonSettings(object):
         if toolkit not in _toolkits:
             msg = 'Invalid toolkit specified. '
             msg += 'Valid toolkit identifiers are: %s ' % _toolkits.keys()
-            msg += 'Reverting to default: %s' % PymazonSettings.toolkit
+            msg += 'Reverting to default: %s' % _PymazonSettings.toolkit
             warnings.warn(msg)
             return False
         return True
@@ -121,7 +121,7 @@ class PymazonSettings(object):
     def __validate_numthreads(self, numthreads):
         msg = 'Invalid number of threads. Should be an integer >= 1, '
         msg += 'got "%s" instead. ' % numthreads
-        msg += 'Reverting to default: %s.' % PymazonSettings.num_threads
+        msg += 'Reverting to default: %s.' % _PymazonSettings.num_threads
         
         try:
             n = int(numthreads)
@@ -133,13 +133,13 @@ class PymazonSettings(object):
             return False
         return n
         
-            
+settings = _PymazonSettings()
+
 #-------------------------------------------------------------------------------
 # pymazonrc handling
 #-------------------------------------------------------------------------------
 
-def _handle_config_file():
-    settings = PymazonSettings()
+def _handle_config_file():    
     config_file = os.path.join(settings.pymazon_dir, 'pymazonrc')
     if os.path.exists(config_file):
         cp = ConfigParser()
@@ -170,8 +170,3 @@ def _handle_config_file():
         except (NoOptionError, NoSectionError):
             pass
 _handle_config_file()
-
-if __name__ == '__main__':
-    settings = PymazonSettings()
-    print settings.save_dir
-    print settings.amz_dir
